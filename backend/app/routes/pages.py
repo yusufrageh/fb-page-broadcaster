@@ -6,7 +6,7 @@ from datetime import datetime
 
 from app.core.database import get_db
 from app.models.page import Page
-from app.services.facebook import login_to_facebook, fetch_managed_pages
+from app.services.facebook import login_to_facebook, fetch_managed_pages, close_page
 
 router = APIRouter(prefix="/api/pages", tags=["pages"])
 
@@ -28,6 +28,8 @@ async def fetch_pages(db: AsyncSession = Depends(get_db)):
         raw_pages = await fetch_managed_pages(page)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        await close_page()
 
     results = []
     for rp in raw_pages:

@@ -45,8 +45,23 @@ async def get_browser() -> Browser:
     return _browser
 
 
+async def close_page():
+    """Close the current page and its browser context (tab cleanup)."""
+    global _page
+    if _page:
+        try:
+            context = _page.context
+            await _page.close()
+            await context.close()
+        except Exception:
+            pass
+        _page = None
+
+
 async def login_to_facebook() -> PlaywrightPage:
     global _page
+    # Close any previously open page/context to avoid leaking tabs
+    await close_page()
     browser = await get_browser()
     context = await browser.new_context(
         user_agent=(
@@ -175,31 +190,6 @@ async def fetch_page_conversations(page: PlaywrightPage, fb_page_id: str, max_co
 
     await page.evaluate("() => { window.__collectedContacts = {}; }")
 
-    # Find a REAL conversation row — filter by bounding box size
-    mouse_ready = False
-    conv_row_info = await page.evaluate("""
-        () => {
-            const rows = document.querySelectorAll('div[role="presentation"]');
-            for (const row of rows) {
-                const r = row.getBoundingClientRect();
-                if (r.height > 50 && r.width > 200) {
-                    return { x: r.x, y: r.y, w: r.width, h: r.height };
-                }
-            }
-            return null;
-        }
-    """)
-
-    if conv_row_info:
-        # Position mouse in the middle of the conversation row (left panel)
-        mouse_x = conv_row_info["x"] + conv_row_info["w"] / 2
-        mouse_y = conv_row_info["y"] + conv_row_info["h"] / 2
-        await page.mouse.move(mouse_x, mouse_y)
-        mouse_ready = True
-        _log(f"[DEBUG] Mouse over conversation row at ({mouse_x:.0f}, {mouse_y:.0f}), row size {conv_row_info['w']:.0f}x{conv_row_info['h']:.0f}")
-    else:
-        _log("[DEBUG] Could not find a large conversation row for mouse positioning")
-
     stale_rounds = 0
     prev_collected = 0
     for scroll_round in range(200):
@@ -240,30 +230,20 @@ async def fetch_page_conversations(page: PlaywrightPage, fb_page_id: str, max_co
 
         if collected == prev_collected:
             stale_rounds += 1
-            if stale_rounds >= 8:
-                _log(f"[DEBUG] No new contacts after 8 scroll attempts at {collected}, stopping")
+            if stale_rounds % 3 == 0:
+                await _scroll_conv_container(page, 1500)
+                await asyncio.sleep(1.5)
+            if stale_rounds >= 25:
+                _log(f"[DEBUG] No new contacts after 25 scroll attempts at {collected}, stopping")
                 break
         else:
             stale_rounds = 0
             _log(f"[DEBUG] Round {scroll_round}: {collected} contacts")
         prev_collected = collected
 
-        # Scroll with native mouse wheel
-        if mouse_ready:
-            await page.mouse.wheel(0, 300)
-        else:
-            await page.evaluate("""
-                () => {
-                    const rows = document.querySelectorAll('div[role="presentation"]');
-                    const big = Array.from(rows).filter(r => {
-                        const b = r.getBoundingClientRect();
-                        return b.height > 50 && b.width > 200;
-                    });
-                    if (big.length) big[big.length - 1].scrollIntoView({ block: 'end' });
-                }
-            """)
-
-        await asyncio.sleep(0.6)
+        # Scroll the conversation list container directly
+        await _scroll_conv_container(page, 500)
+        await asyncio.sleep(0.8)
 
     # Final progress update
     await ws_manager.broadcast("contacts:fetch_progress", {
@@ -366,46 +346,58 @@ async def send_message_in_conversation(page: PlaywrightPage, message: str) -> bo
         return False
 
 
-async def _position_mouse_on_conv_list(page: PlaywrightPage) -> bool:
-    """Move mouse over a conversation row. Returns True if positioned."""
-    conv_row = await page.evaluate("""
-        () => {
+async def _scroll_conv_container(page: PlaywrightPage, amount: int = 600) -> bool:
+    """Scroll the conversation list container directly via JS.
+    Finds a conversation row, walks up to its scrollable parent, and scrolls it.
+    Returns True if a scrollable container was found and scrolled."""
+    scrolled = await page.evaluate("""
+        (amount) => {
+            // Find a real conversation row
             const rows = document.querySelectorAll('div[role="presentation"]');
+            let convRow = null;
             for (const row of rows) {
                 const r = row.getBoundingClientRect();
-                if (r.height > 50 && r.width > 200) {
-                    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-                }
+                if (r.height > 50 && r.width > 200) { convRow = row; break; }
             }
-            return null;
+            if (!convRow) return false;
+
+            // Walk up to find the scrollable container
+            let el = convRow.parentElement;
+            while (el && el !== document.body) {
+                if (el.scrollHeight > el.clientHeight + 10) {
+                    el.scrollTop += amount;
+                    return true;
+                }
+                el = el.parentElement;
+            }
+            return false;
         }
-    """)
-    if conv_row:
-        await page.mouse.move(conv_row["x"], conv_row["y"])
-        return True
-    return False
+    """, amount)
+    return scrolled
 
 
-async def scroll_conversation_list(page: PlaywrightPage):
-    """Scroll the conversation list down one step."""
-    if await _position_mouse_on_conv_list(page):
-        await page.mouse.wheel(0, 600)
+async def scroll_conversation_list(page: PlaywrightPage, steps: int = 1):
+    """Scroll the conversation list down. Use steps > 1 to scroll further."""
+    for _ in range(steps):
+        await _scroll_conv_container(page, 600)
         await asyncio.sleep(1)
 
 
 async def burst_scroll_to_unsent(page: PlaywrightPage, skip_names: set, max_scrolls: int = 1000) -> bool:
     """Rapidly scroll past already-sent conversations until an unsent one is found.
     Returns True if an unsent conversation is now visible, False if end of list reached."""
-    if not await _position_mouse_on_conv_list(page):
-        return False
-
     stale = 0
     total_scrolled = 0
     all_seen_names = set()
 
     for i in range(max_scrolls):
-        # Scroll and give lazy loading time to fetch new conversations
-        await page.mouse.wheel(0, 800)
+        # Progressive scroll amount: faster when stale
+        scroll_amount = 800 if stale < 10 else 2000
+        scrolled = await _scroll_conv_container(page, scroll_amount)
+        if not scrolled:
+            _log("[DEBUG] Could not find scrollable conversation container")
+            return False
+
         await asyncio.sleep(1.0)
         total_scrolled += 1
 
@@ -423,19 +415,18 @@ async def burst_scroll_to_unsent(page: PlaywrightPage, skip_names: set, max_scro
         all_seen_names.update(visible_set)
 
         if new_names:
-            stale = 0  # new conversations loaded, keep going
+            stale = 0
         else:
             stale += 1
-            # When stale, try a bigger scroll to break through
             if stale % 5 == 0:
-                await page.mouse.wheel(0, 2000)
+                _log(f"[DEBUG] Stale at {stale}, doing aggressive burst scroll...")
+                await _scroll_conv_container(page, 4000)
                 await asyncio.sleep(1.5)
                 total_scrolled += 1
-            if stale >= 30:
+            if stale >= 50:
                 _log(f"[DEBUG] Reached end of conversation list after {total_scrolled} scrolls ({len(all_seen_names)} total contacts seen)")
                 return False
 
-        # Log progress every 10 scrolls
         if total_scrolled % 10 == 0:
             _log(f"[DEBUG] Burst scrolling... {total_scrolled} scrolls, {len(all_seen_names)} contacts seen, skipping sent")
 

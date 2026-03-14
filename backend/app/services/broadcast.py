@@ -13,9 +13,8 @@ from app.services.facebook import (
     login_to_facebook, navigate_to_inbox,
     get_visible_conversations, click_conversation_by_name,
     send_message_in_conversation, scroll_conversation_list,
-    burst_scroll_to_unsent, _log,
+    burst_scroll_to_unsent, close_page, _log,
 )
-from app.services.message import rephrase_message
 from app.websocket.manager import ws_manager
 
 _current_task: asyncio.Task | None = None
@@ -73,7 +72,7 @@ async def _run_broadcast(broadcast_id: int):
 
             sent_count = 0
             failed_count = 0
-            stale_scroll_rounds = 0
+            consecutive_all_sent = 0
 
             await ws_manager.broadcast("broadcast:progress", {
                 "sent": 0, "failed": 0,
@@ -81,6 +80,21 @@ async def _run_broadcast(broadcast_id: int):
                 "total": batch_size,
                 "current_contact": None,
             })
+
+            # Pre-scroll to load more conversations into the list before starting
+            _log("[DEBUG] Pre-scrolling to load conversations...")
+            await ws_manager.broadcast("broadcast:progress", {
+                "sent": 0, "failed": 0,
+                "remaining": batch_size,
+                "total": batch_size,
+                "current_contact": "Loading conversations...",
+            })
+            for _ in range(10):
+                await scroll_conversation_list(page)
+            # Scroll back to top so we start from the beginning
+            from app.services.facebook import _scroll_conv_container
+            await _scroll_conv_container(page, -99999)
+            await asyncio.sleep(2)
 
             while sent_count < batch_size:
                 if _stop_event.is_set():
@@ -104,7 +118,14 @@ async def _run_broadcast(broadcast_id: int):
                         break
 
                 if not target:
-                    # All visible are already sent — burst scroll past them
+                    consecutive_all_sent += 1
+                    # First try a few normal scrolls before burst scrolling
+                    if consecutive_all_sent <= 3:
+                        _log(f"[DEBUG] All visible sent, quick scroll attempt {consecutive_all_sent}/3...")
+                        await scroll_conversation_list(page, steps=3)
+                        continue
+
+                    # All quick scrolls exhausted — burst scroll past sent contacts
                     _log(f"[DEBUG] All visible sent, burst scrolling to find unsent...")
                     await ws_manager.broadcast("broadcast:progress", {
                         "sent": sent_count, "failed": failed_count,
@@ -116,9 +137,8 @@ async def _run_broadcast(broadcast_id: int):
                     if not found:
                         _log(f"[DEBUG] No more unsent conversations in inbox")
                         break
+                    consecutive_all_sent = 0
                     continue
-
-                stale_scroll_rounds = 0
                 skip_names.add(target)
 
                 await ws_manager.broadcast("broadcast:progress", {
@@ -139,15 +159,8 @@ async def _run_broadcast(broadcast_id: int):
 
                 await asyncio.sleep(3)
 
-                # Rephrase message
-                try:
-                    variants = await rephrase_message(broadcast.base_message, variant_count=1)
-                    rephrased = variants[0]
-                except Exception:
-                    rephrased = broadcast.base_message
-
                 # Send message
-                success = await send_message_in_conversation(page, rephrased)
+                success = await send_message_in_conversation(page, broadcast.base_message)
 
                 # Save / update contact in DB
                 fb_user_id = target.replace(' ', '_')
@@ -170,7 +183,7 @@ async def _run_broadcast(broadcast_id: int):
                 log = MessageLog(
                     broadcast_id=broadcast.id,
                     contact_id=contact.id,
-                    message_text=rephrased,
+                    message_text=broadcast.base_message,
                     status="sent" if success else "failed",
                     error_message=None if success else "Failed to send",
                 )
@@ -190,14 +203,16 @@ async def _run_broadcast(broadcast_id: int):
 
                 await ws_manager.broadcast("broadcast:message_sent", {
                     "contact_name": target,
-                    "message_preview": rephrased[:80],
+                    "message_preview": broadcast.base_message[:80],
                     "status": "sent" if success else "failed",
                 })
 
-                # Wait briefly, then scroll down one step so the next unsent
-                # conversation becomes visible (no full page reload — keeps scroll position)
+                # Reset consecutive counter since we found & sent to someone
+                consecutive_all_sent = 0
+
+                # Wait briefly, then scroll down to advance past the sent conversation
                 await asyncio.sleep(1)
-                await scroll_conversation_list(page)
+                await scroll_conversation_list(page, steps=2)
 
                 # Random delay between messages
                 if sent_count < batch_size:
@@ -225,3 +240,6 @@ async def _run_broadcast(broadcast_id: int):
             await ws_manager.broadcast("broadcast:error", {
                 "error_message": str(e),
             })
+        finally:
+            _log("[DEBUG] Closing browser tab after broadcast...")
+            await close_page()

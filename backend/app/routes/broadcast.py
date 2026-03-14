@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update, func
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -85,6 +85,9 @@ async def fetch_contacts(db: AsyncSession = Depends(get_db)):
         raw_contacts = await fetch_page_conversations(browser_page, page.fb_page_id, max_contacts=max_contacts)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        from app.services.facebook import close_page
+        await close_page()
 
     results = []
     for rc in raw_contacts:
@@ -168,6 +171,48 @@ async def stop_broadcast_endpoint():
         raise HTTPException(status_code=400, detail="No broadcast is running")
     await stop_broadcast()
     return {"status": "stopping"}
+
+
+@router.post("/broadcast/reset-campaign")
+async def reset_campaign(db: AsyncSession = Depends(get_db)):
+    """Clear sent-to tracking for the active page so all contacts can be messaged again."""
+    result = await db.execute(select(Page).where(Page.is_active == True))
+    page = result.scalar_one_or_none()
+    if not page:
+        raise HTTPException(status_code=400, detail="No active page selected")
+
+    res = await db.execute(
+        update(Contact)
+        .where(Contact.page_id == page.id)
+        .where(Contact.last_broadcast_at.isnot(None))
+        .values(last_broadcast_at=None)
+    )
+    await db.commit()
+
+    return {"reset_count": res.rowcount, "page_name": page.name}
+
+
+@router.get("/broadcast/stats")
+async def broadcast_stats(db: AsyncSession = Depends(get_db)):
+    """Return total contacts sent to for the active page."""
+    result = await db.execute(select(Page).where(Page.is_active == True))
+    page = result.scalar_one_or_none()
+    if not page:
+        return {"total_sent_to": 0, "total_contacts": 0}
+
+    sent_to = await db.execute(
+        select(func.count()).select_from(Contact).where(
+            Contact.page_id == page.id,
+            Contact.last_broadcast_at.isnot(None),
+        )
+    )
+    total = await db.execute(
+        select(func.count()).select_from(Contact).where(Contact.page_id == page.id)
+    )
+    return {
+        "total_sent_to": sent_to.scalar(),
+        "total_contacts": total.scalar(),
+    }
 
 
 @router.get("/broadcast/status")

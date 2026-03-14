@@ -16,12 +16,16 @@ export default function Broadcast() {
   const [logs, setLogs] = useState([]);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [resetResult, setResetResult] = useState(null);
+  const [stats, setStats] = useState(null);
 
   const { on, connected } = useWebSocket();
 
   useEffect(() => {
     api.get("/broadcast/status").then((r) => setStatus(r.data)).catch(() => {});
     api.get("/settings").then((r) => setBatchSize(r.data.default_batch_size)).catch(() => {});
+    api.get("/broadcast/stats").then((r) => setStats(r.data)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -30,6 +34,7 @@ export default function Broadcast() {
     const unsub3 = on("broadcast:completed", (data) => {
       setStatus((s) => ({ ...s, running: false, broadcast: { ...s?.broadcast, status: "completed" } }));
       setProgress(null);
+      api.get("/broadcast/stats").then((r) => setStats(r.data)).catch(() => {});
     });
     const unsub4 = on("broadcast:error", (data) => setError(data.error_message));
     return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
@@ -57,6 +62,20 @@ export default function Broadcast() {
     }
   };
 
+  const resetCampaign = async () => {
+    if (!confirm("Start a new campaign?\n\nThis will clear the sent-to history so ALL contacts will receive messages again.")) return;
+    setResetting(true);
+    setResetResult(null);
+    try {
+      const r = await api.post("/broadcast/reset-campaign");
+      setResetResult(`Campaign reset — ${r.data.reset_count} contacts cleared for "${r.data.page_name}"`);
+      api.get("/broadcast/stats").then((r) => setStats(r.data)).catch(() => {});
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message);
+    }
+    setResetting(false);
+  };
+
   const isRunning = status?.running;
 
   return (
@@ -68,6 +87,20 @@ export default function Broadcast() {
           <span className="text-xs text-gray-500">{connected ? "Connected" : "Disconnected"}</span>
         </div>
       </div>
+
+      {/* Stats */}
+      {stats && (
+        <div className="grid grid-cols-2 gap-4 mb-6">
+          <div className="bg-white rounded-xl shadow-sm border p-4 text-center">
+            <div className="text-2xl font-bold text-green-700">{stats.total_sent_to}</div>
+            <div className="text-xs text-gray-500 mt-1">Sent To (this campaign)</div>
+          </div>
+          <div className="bg-white rounded-xl shadow-sm border p-4 text-center">
+            <div className="text-2xl font-bold text-blue-700">{stats.total_contacts}</div>
+            <div className="text-xs text-gray-500 mt-1">Total Contacts in DB</div>
+          </div>
+        </div>
+      )}
 
       {/* Compose & Launch */}
       {!isRunning && (
@@ -100,7 +133,17 @@ export default function Broadcast() {
             >
               {starting ? "Starting..." : "Start Broadcast"}
             </button>
+            <button
+              onClick={resetCampaign}
+              disabled={resetting}
+              className="bg-amber-500 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-amber-600 disabled:opacity-50 transition-colors"
+            >
+              {resetting ? "Resetting..." : "New Campaign"}
+            </button>
           </div>
+          {resetResult && (
+            <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm">{resetResult}</p>
+          )}
         </div>
       )}
 
