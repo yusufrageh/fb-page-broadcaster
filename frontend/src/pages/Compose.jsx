@@ -25,7 +25,7 @@ export default function Compose() {
 
         <button
           onClick={() => {
-            localStorage.setItem("broadcast_message", message);
+            localStorage.setItem("broadcast_message", JSON.stringify([message]));
             navigate("/broadcast");
           }}
           disabled={!message.trim()}

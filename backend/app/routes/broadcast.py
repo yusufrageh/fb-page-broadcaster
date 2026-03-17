@@ -1,7 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+import json
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 
 from app.core.database import get_db
@@ -12,10 +16,22 @@ from app.services.broadcast import start_broadcast, stop_broadcast, is_running
 
 router = APIRouter(prefix="/api", tags=["broadcast"])
 
+UPLOADS_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
 
 class BroadcastStart(BaseModel):
-    base_message: str
+    messages: list[str]
     batch_size: int = 50
+    image_filenames: list[str] = []
+
+    @field_validator("messages")
+    @classmethod
+    def at_least_one_message(cls, v):
+        v = [m.strip() for m in v if m.strip()]
+        if not v:
+            raise ValueError("At least one non-empty message is required")
+        return v
 
 
 class BroadcastRead(BaseModel):
@@ -38,6 +54,27 @@ class ContactRead(BaseModel):
     profile_url: str
     last_interaction: datetime | None = None
     last_broadcast_at: datetime | None = None
+
+
+@router.post("/broadcast/upload-image")
+async def upload_image(file: UploadFile = File(...)):
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"File type {ext} not allowed")
+    filename = f"{uuid.uuid4().hex}{ext}"
+    dest = UPLOADS_DIR / filename
+    UPLOADS_DIR.mkdir(exist_ok=True)
+    content = await file.read()
+    dest.write_bytes(content)
+    return {"filename": filename, "original_name": file.filename}
+
+
+@router.delete("/broadcast/upload-image/{filename}")
+async def delete_image(filename: str):
+    filepath = UPLOADS_DIR / filename
+    if filepath.exists():
+        filepath.unlink()
+    return {"deleted": filename}
 
 
 @router.get("/contacts", response_model=list[ContactRead])
@@ -141,7 +178,8 @@ async def start_broadcast_endpoint(data: BroadcastStart, db: AsyncSession = Depe
 
     broadcast = Broadcast(
         page_id=page.id,
-        base_message=data.base_message,
+        base_message=json.dumps(data.messages),
+        image_paths=json.dumps(data.image_filenames) if data.image_filenames else None,
         batch_size=data.batch_size,
         status="pending",
     )

@@ -25,5 +25,8 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Uploads
+backend/uploads/
+
 # Playwright
 playwright/.cache/

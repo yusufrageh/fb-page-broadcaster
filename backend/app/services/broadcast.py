@@ -1,6 +1,8 @@
 import asyncio
+import json
 import random
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -12,10 +14,13 @@ from app.models.message_log import MessageLog
 from app.services.facebook import (
     login_to_facebook, navigate_to_inbox,
     get_visible_conversations, click_conversation_by_name,
-    send_message_in_conversation, scroll_conversation_list,
+    send_message_in_conversation, send_message_with_optional_image,
+    scroll_conversation_list,
     burst_scroll_to_unsent, close_page, _log,
 )
 from app.websocket.manager import ws_manager
+
+UPLOADS_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
 
 _current_task: asyncio.Task | None = None
 _stop_event = asyncio.Event()
@@ -50,6 +55,29 @@ async def _run_broadcast(broadcast_id: int):
         settings = result.scalar_one_or_none()
         min_delay = settings.min_delay if settings else 5.0
         max_delay = settings.max_delay if settings else 15.0
+
+        # Parse message variants (stored as JSON array in base_message)
+        try:
+            messages = json.loads(broadcast.base_message)
+            if not isinstance(messages, list):
+                messages = [broadcast.base_message]
+        except (json.JSONDecodeError, TypeError):
+            messages = [broadcast.base_message]
+
+        # Parse optional image filenames
+        image_files = []
+        if broadcast.image_paths:
+            try:
+                filenames = json.loads(broadcast.image_paths)
+                if isinstance(filenames, list):
+                    for fn in filenames:
+                        fpath = UPLOADS_DIR / fn
+                        if fpath.exists():
+                            image_files.append(str(fpath))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if image_files:
+            _log(f"[DEBUG] Broadcast has {len(image_files)} image(s) attached")
 
         batch_size = broadcast.batch_size
         broadcast.total_contacts = batch_size
@@ -159,8 +187,10 @@ async def _run_broadcast(broadcast_id: int):
 
                 await asyncio.sleep(3)
 
-                # Send message
-                success = await send_message_in_conversation(page, broadcast.base_message)
+                # Pick a random message variant and optionally a random image
+                picked_message = random.choice(messages)
+                picked_image = random.choice(image_files) if image_files else None
+                success = await send_message_with_optional_image(page, picked_message, picked_image)
 
                 # Save / update contact in DB
                 fb_user_id = target.replace(' ', '_')
@@ -183,7 +213,7 @@ async def _run_broadcast(broadcast_id: int):
                 log = MessageLog(
                     broadcast_id=broadcast.id,
                     contact_id=contact.id,
-                    message_text=broadcast.base_message,
+                    message_text=picked_message,
                     status="sent" if success else "failed",
                     error_message=None if success else "Failed to send",
                 )
@@ -203,7 +233,7 @@ async def _run_broadcast(broadcast_id: int):
 
                 await ws_manager.broadcast("broadcast:message_sent", {
                     "contact_name": target,
-                    "message_preview": broadcast.base_message[:80],
+                    "message_preview": picked_message[:80],
                     "status": "sent" if success else "failed",
                 })
 

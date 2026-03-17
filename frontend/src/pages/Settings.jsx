@@ -5,19 +5,18 @@ export default function Settings() {
   const [form, setForm] = useState({
     fb_email: "",
     fb_password: "",
-    gemini_api_key: "",
     min_delay: 5,
     max_delay: 15,
     default_batch_size: 50,
     max_contacts: 100,
   });
-  const [status, setStatus] = useState({ fb_password_set: false, gemini_api_key_set: false });
+  const [status, setStatus] = useState({ fb_password_set: false });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
     api.get("/settings").then((r) => {
-      setStatus({ fb_password_set: r.data.fb_password_set, gemini_api_key_set: r.data.gemini_api_key_set });
+      setStatus({ fb_password_set: r.data.fb_password_set });
       setForm((f) => ({
         ...f,
         fb_email: r.data.fb_email,
@@ -36,11 +35,10 @@ export default function Settings() {
     try {
       const payload = { ...form };
       if (!payload.fb_password) delete payload.fb_password;
-      if (!payload.gemini_api_key) delete payload.gemini_api_key;
       const r = await api.put("/settings", payload);
-      setStatus({ fb_password_set: r.data.fb_password_set, gemini_api_key_set: r.data.gemini_api_key_set });
+      setStatus({ fb_password_set: r.data.fb_password_set });
       setMsg("Settings saved!");
-      setForm((f) => ({ ...f, fb_password: "", gemini_api_key: "" }));
+      setForm((f) => ({ ...f, fb_password: "" }));
     } catch (err) {
       setMsg("Error: " + (err.response?.data?.detail || err.message));
     }
@@ -72,22 +70,6 @@ export default function Settings() {
               value={form.fb_password}
               onChange={(e) => setForm({ ...form, fb_password: e.target.value })}
               placeholder={status.fb_password_set ? "Leave blank to keep current" : "Enter password"}
-            />
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4">
-          <h3 className="text-lg font-semibold text-gray-800">Gemini API</h3>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              API Key {status.gemini_api_key_set && <span className="text-green-600">(set)</span>}
-            </label>
-            <input
-              type="password"
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-              value={form.gemini_api_key}
-              onChange={(e) => setForm({ ...form, gemini_api_key: e.target.value })}
-              placeholder={status.gemini_api_key_set ? "Leave blank to keep current" : "Enter Gemini API key"}
             />
           </div>
         </div>

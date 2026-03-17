@@ -8,7 +8,6 @@ class Settings(Base):
     id = Column(Integer, primary_key=True, default=1)
     fb_email = Column(String, default="")
     fb_password = Column(String, default="")  # encrypted
-    gemini_api_key = Column(String, default="")  # encrypted
     min_delay = Column(Float, default=5.0)
     max_delay = Column(Float, default=15.0)
     default_batch_size = Column(Integer, default=50)

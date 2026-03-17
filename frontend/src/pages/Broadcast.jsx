@@ -5,10 +5,17 @@ import ProgressBar from "../components/ProgressBar";
 import StatusBadge from "../components/StatusBadge";
 
 export default function Broadcast() {
-  const [message, setMessage] = useState(() => {
+  const [messages, setMessages] = useState(() => {
     const saved = localStorage.getItem("broadcast_message");
-    if (saved) localStorage.removeItem("broadcast_message");
-    return saved || "";
+    if (saved) {
+      localStorage.removeItem("broadcast_message");
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch {}
+      return saved.trim() ? [saved] : [""];
+    }
+    return [""];
   });
   const [batchSize, setBatchSize] = useState(50);
   const [status, setStatus] = useState(null);
@@ -19,6 +26,7 @@ export default function Broadcast() {
   const [resetting, setResetting] = useState(false);
   const [resetResult, setResetResult] = useState(null);
   const [stats, setStats] = useState(null);
+  const [images, setImages] = useState([]);
 
   const { on, connected } = useWebSocket();
 
@@ -40,13 +48,59 @@ export default function Broadcast() {
     return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
   }, [on]);
 
+  const updateMessage = (index, value) => {
+    setMessages((prev) => prev.map((m, i) => (i === index ? value : m)));
+  };
+  const addMessage = () => setMessages((prev) => [...prev, ""]);
+  const removeMessage = (index) => setMessages((prev) => prev.filter((_, i) => i !== index));
+
+  const hasValidMessage = messages.some((m) => m.trim());
+
+  const handleImageUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    for (const file of files) {
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        const r = await api.post("/broadcast/upload-image", formData, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        setImages((prev) => [
+          ...prev,
+          {
+            filename: r.data.filename,
+            originalName: r.data.original_name,
+            previewUrl: `/uploads/${r.data.filename}`,
+          },
+        ]);
+      } catch (err) {
+        setError(err.response?.data?.detail || "Image upload failed");
+      }
+    }
+    e.target.value = "";
+  };
+
+  const removeImage = async (filename) => {
+    try {
+      await api.delete(`/broadcast/upload-image/${filename}`);
+      setImages((prev) => prev.filter((img) => img.filename !== filename));
+    } catch (err) {
+      setError(err.response?.data?.detail || "Failed to delete image");
+    }
+  };
+
   const start = async () => {
-    if (!message.trim()) return;
+    const validMessages = messages.filter((m) => m.trim());
+    if (validMessages.length === 0) return;
     setStarting(true);
     setError("");
     setLogs([]);
     try {
-      const r = await api.post("/broadcast/start", { base_message: message, batch_size: batchSize });
+      const r = await api.post("/broadcast/start", {
+        messages: validMessages,
+        batch_size: batchSize,
+        image_filenames: images.map((img) => img.filename),
+      });
       setStatus({ running: true, broadcast: r.data });
     } catch (err) {
       setError(err.response?.data?.detail || err.message);
@@ -106,15 +160,85 @@ export default function Broadcast() {
       {!isRunning && (
         <div className="bg-white rounded-xl shadow-sm border p-6 mb-6 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
-            <textarea
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-none"
-              rows={4}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder="Type your broadcast message..."
-            />
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium text-gray-700">
+                Messages ({messages.length} variant{messages.length > 1 ? "s" : ""})
+              </label>
+              <button
+                type="button"
+                onClick={addMessage}
+                className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+              >
+                + Add Variant
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-2">Each contact will receive a randomly picked variant.</p>
+            <div className="space-y-2">
+              {messages.map((msg, i) => (
+                <div key={i} className="flex gap-2">
+                  <textarea
+                    className="flex-1 border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-none"
+                    rows={3}
+                    value={msg}
+                    onChange={(e) => updateMessage(i, e.target.value)}
+                    placeholder={`Message variant ${i + 1}...`}
+                  />
+                  {messages.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeMessage(i)}
+                      className="text-red-400 hover:text-red-600 px-1 self-start mt-1"
+                      title="Remove variant"
+                    >
+                      &times;
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
+          {/* Image Attachments */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium text-gray-700">
+                Images {images.length > 0 && `(${images.length})`}
+              </label>
+              <label className="text-blue-600 hover:text-blue-800 text-sm font-medium cursor-pointer">
+                + Add Image
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={handleImageUpload}
+                />
+              </label>
+            </div>
+            <p className="text-xs text-gray-500 mb-2">Optional — each contact gets a randomly picked image pasted into the chat.</p>
+            {images.length > 0 && (
+              <div className="flex flex-wrap gap-3">
+                {images.map((img) => (
+                  <div key={img.filename} className="relative group">
+                    <img
+                      src={img.previewUrl}
+                      alt={img.originalName}
+                      className="w-20 h-20 object-cover rounded-lg border"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeImage(img.filename)}
+                      className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Remove"
+                    >
+                      &times;
+                    </button>
+                    <p className="text-xs text-gray-400 mt-1 truncate w-20">{img.originalName}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="flex items-end gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Batch Size</label>
@@ -128,7 +252,7 @@ export default function Broadcast() {
             </div>
             <button
               onClick={start}
-              disabled={starting || !message.trim()}
+              disabled={starting || !hasValidMessage}
               className="bg-green-600 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
             >
               {starting ? "Starting..." : "Start Broadcast"}

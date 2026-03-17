@@ -11,6 +11,7 @@ class Broadcast(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     page_id = Column(Integer, ForeignKey("pages.id"), nullable=False)
     base_message = Column(String, nullable=False)
+    image_paths = Column(String, nullable=True)
     batch_size = Column(Integer, default=50)
     status = Column(String, default="pending")  # pending/running/completed/stopped/failed
     total_contacts = Column(Integer, default=0)

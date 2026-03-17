@@ -4,19 +4,25 @@ import sys
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import app_settings
 from app.core.database import init_db
 from app.routes import settings, pages, compose, broadcast, history
 from app.websocket.manager import ws_manager
 
+UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    UPLOADS_DIR.mkdir(exist_ok=True)
     await init_db()
     yield
 
@@ -37,6 +43,9 @@ app.include_router(pages.router)
 app.include_router(compose.router)
 app.include_router(broadcast.router)
 app.include_router(history.router)
+
+
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 
 @app.websocket("/ws")

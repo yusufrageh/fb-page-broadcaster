@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from pathlib import Path
 from playwright.async_api import async_playwright, Browser, Page as PlaywrightPage
 
 from app.core.security import decrypt
@@ -68,7 +69,7 @@ async def login_to_facebook() -> PlaywrightPage:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
-        )
+        ),
     )
     _page = await context.new_page()
     email, password = await _get_credentials()
@@ -343,6 +344,105 @@ async def send_message_in_conversation(page: PlaywrightPage, message: str) -> bo
         return True
     except Exception as e:
         _log(f"[DEBUG] Failed to type/send message: {e}")
+        return False
+
+
+async def attach_image_in_conversation(page: PlaywrightPage, image_path: str) -> bool:
+    """Attach an image by clicking the attach button and intercepting the file chooser dialog.
+    Uses Playwright's expect_file_chooser() so the native dialog never actually opens."""
+    try:
+        path = Path(image_path)
+        if not path.exists():
+            _log(f"[DEBUG] Image file not found: {image_path}")
+            return False
+
+        # Find the attachment button
+        attach_selectors = [
+            '[aria-label*="file" i]',
+            '[aria-label*="attach" i]',
+            '[aria-label*="image" i]',
+            '[aria-label*="photo" i]',
+            '[aria-label*="media" i]',
+            '[aria-label*="Add" i]',
+        ]
+        attach_btn = None
+        for sel in attach_selectors:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=2000):
+                    attach_btn = btn
+                    _log(f"[DEBUG] Found attachment button: {sel}")
+                    break
+            except Exception:
+                continue
+
+        if not attach_btn:
+            _log("[DEBUG] No attachment button found on page")
+            return False
+
+        # Intercept the file chooser dialog and set the file
+        async with page.expect_file_chooser(timeout=10000) as fc_info:
+            await attach_btn.click()
+        file_chooser = await fc_info.value
+        await file_chooser.set_files(str(path))
+        _log(f"[DEBUG] Image attached via file chooser: {path.name}")
+        await asyncio.sleep(3)  # Wait for image upload/preview
+        return True
+    except Exception as e:
+        _log(f"[DEBUG] Failed to attach image: {e}")
+        return False
+
+
+async def send_message_with_optional_image(page: PlaywrightPage, message: str, image_path: str | None = None) -> bool:
+    """Type a message, optionally attach an image, then send."""
+    try:
+        if image_path:
+            attached = await attach_image_in_conversation(page, image_path)
+            if not attached:
+                _log("[DEBUG] Image attach failed, sending text only")
+
+        # Dismiss any overlay (e.g. "Attach a file" tooltip) that covers the textbox
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+
+        # Re-focus the textbox after image attachment — use force=True
+        # because Facebook overlays can still intercept pointer events
+        msg_box = page.locator('[role="textbox"]').last
+        await msg_box.wait_for(state="visible", timeout=10000)
+        await msg_box.click(force=True, timeout=5000)
+        await asyncio.sleep(0.5)
+        # Use type() instead of fill() — fill() clears the field first and
+        # can interfere with Facebook's rich editor after image attachment
+        await msg_box.press_sequentially(message, delay=30)
+        await asyncio.sleep(0.5)
+
+        # Try clicking the send button first (more reliable with image attached)
+        sent = False
+        send_selectors = [
+            '[aria-label="Send" i]',
+            '[aria-label*="send" i]',
+            '[aria-label="Press enter to send" i]',
+        ]
+        for sel in send_selectors:
+            try:
+                send_btn = page.locator(sel).first
+                if await send_btn.is_visible(timeout=1500):
+                    await send_btn.click()
+                    sent = True
+                    _log(f"[DEBUG] Clicked send button: {sel}")
+                    break
+            except Exception:
+                continue
+
+        if not sent:
+            # Fallback to Enter key
+            await msg_box.press("Enter")
+            _log("[DEBUG] Used Enter key to send")
+
+        await asyncio.sleep(2)
+        return True
+    except Exception as e:
+        _log(f"[DEBUG] Failed to send message with image: {e}")
         return False
 
 
